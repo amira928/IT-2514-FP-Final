@@ -1,0 +1,2 @@
+@echo off
+powershell -NoProfile -Command "$p = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'; $g = Get-ChildItem $p -Recurse -Filter gcc.exe | Where-Object { $_.FullName -like '*\mingw64\bin\gcc.exe' } | Select-Object -First 1; $root = Split-Path (Split-Path $g.FullName); Copy-Item $root 'C:\mingw64' -Recurse -Force; Write-Host ('Copied from ' + $root)"
