@@ -51,4 +51,60 @@ public static class CustomerCatalog
 
         return Result<IReadOnlyList<RawCustomer>>.Ok(customers);
     }
+    public static Result<IReadOnlyList<Customer>> Build(IReadOnlyList<RawCustomer> raws)
+    {
+        ArgumentNullException.ThrowIfNull(raws);
+
+        var customers = new List<Customer>();
+        var errors = new List<string>();
+
+        foreach (var raw in raws)
+        {
+            switch (Customer.Create(raw))
+            {
+                case Result<Customer>.Success success:
+                    customers.Add(success.Value);
+                    break;
+                case Result<Customer>.Failure failure:
+                    errors.AddRange(failure.Errors);
+                    break;
+            }
+        }
+
+        errors.AddRange(customers
+            .GroupBy(c => c.Id)
+            .Where(g => g.Count() > 1)
+            .Select(g => $"Duplicate customer id '{g.Key}'."));
+
+        if (errors.Count > 0)
+        {
+            return new Result<IReadOnlyList<Customer>>.Failure(errors);
+        }
+
+        return Result<IReadOnlyList<Customer>>.Ok(customers);
+    }
+
+    public static Result<IReadOnlyList<Customer>> LoadValidated(string path) =>
+        Load(path).Bind(raws => Build(raws));
+
+    public static Maybe<Customer> FindById(IReadOnlyList<Customer> customers, string? id)
+    {
+        ArgumentNullException.ThrowIfNull(customers);
+
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return Maybe<Customer>.Empty();
+        }
+
+        string key = id.Trim();
+        foreach (var customer in customers)
+        {
+            if (string.Equals(customer.Id, key, StringComparison.OrdinalIgnoreCase))
+            {
+                return Maybe<Customer>.Of(customer);
+            }
+        }
+
+        return Maybe<Customer>.Empty();
+    }
 }
