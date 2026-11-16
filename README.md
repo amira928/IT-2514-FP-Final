@@ -1,104 +1,78 @@
-# Delivery Quotes – Assignment 8: Extension Methods and LINQ
-
-## Team
-| Name | Group | Contribution |
-|---|---|---|
-| Akhmet Amira | IT-2514 | Whole Assignment 8 stage: extensions (`QuoteExtensions.cs`), reports (`Reports.cs`), currying (`Scoring.cs`), lazy and resource code (`LazyQueries.cs`, `LineSource.cs`, `ReportExporter.cs`), native C library (`native/`), adapter (`NativeFeeAdapter.cs`), demonstrations in `Program.cs`, 19 new tests (`Assignment8Tests.cs`), this README. |
-
-## 1. Input and domain rules
-Input: `data/requests.csv` (`Id,Distance`). Distance is an integer 1-50 km. Price: Standard = 500 + 100 per km. Earlier pipeline, Result/Maybe and CSV boundary from Assignments 5-7 are kept.
-
-## 2. Custom extension methods (Task 1)
-| Method | Receiver -> return | Behaviour | Why on this type |
-|---|---|---|---|
-| `OrderByMostExpensive` | `IEnumerable<Quote>` -> `IEnumerable<Quote>` | price descending, then Id; does not change the source | it compares quotes with each other, so it belongs to a sequence of quotes |
-| `DistanceBand` | `Quote` -> `string` | Short (<=5 km), Medium (<=20), Long | it depends only on one quote's distance |
-
-Both are used in `Reports.cs`.
-
-## 3. LINQ reports (Task 2)
-Both reports use quotes calculated from the CSV data.
-
-| | Report 1: premium quotes | Report 2: totals by distance band |
-|---|---|---|
-| User | manager | analyst |
-| Filter | price >= minPrice (1000) | none |
-| Stages | Where, extension order, Select | GroupBy, Select (Count, Sum), OrderByDescending, ThenBy |
-| Output | Id, km, price | band, count, total |
-| Expected (Standard) | R004 5500, R002 1500 | Long 1/5500, Medium 1/1500, Short 2/1300 |
-
-Ordering is deterministic: ties are broken by Id (report 1) and band name (report 2). Reports contain no I/O; printing is in `Program.cs`, export is in `ReportExporter`.
-
-## 4. Currying and partial application (Task 3)
-`Scoring.CreateScore : thresholdKm -> weightPerKm -> Quote -> int`; score = price + max(0, km - threshold) * weight.
-`relaxed = CreateScore(10)(5)`, `strict = CreateScore(2)(20)`; the configured function is passed into `Scoring.Rank`. Same data, different result: R004 = 5700 (relaxed) vs 6460 (strict).
-
-## 5. Deferred execution (Task 4)
-`LazyQueries.LazyQuotes` uses `yield return`: nothing runs when it is created, validation and pricing run during iteration. `ToArray()` is the materialisation point. Iterating the snapshot again does not recalculate; iterating the lazy query again recalculates. The test counts policy calls to prove this.
-
-## 6. Resource ownership (Tasks 5-6)
-| Resource | Owner | Release |
-|---|---|---|
-| `TextReader` in `LineSource.Iterate` | `Iterate` (`using var`) | end of iteration, failure or early stop |
-| `StreamWriter` in `ReportExporter` | `ExportBandTotals` (`using`) | end of the block, also on exception |
-| `File.ReadAllLines` in `CsvLoader` | .NET (convenience API opens and closes the file) | inside the call |
-
-Export writes a `.tmp` file and then moves it, so the target is never half-written; the temp file is removed in `finally`.
-Retention note: datasets are materialised in `Pipeline` (arrays), `LazyQuotes(...).ToArray()` and `LineSource.Snapshot`. A lazy query keeps its source and policy until it is finished; I keep a snapshot where data is reused. No caches, static collections or event subscriptions are used. Streaming uses less memory but keeps the file open; a snapshot closes the file at once but holds all data.
-
-## 7. Native C library (Tasks 7-9)
-Source: `native/delivery_native.c`, header `native/delivery_native.h`.
+# Delivery Quotes - Final Project (Introduction to Functional Programming)
 
 | | |
 |---|---|
-| Function | `int32_t service_fee(int32_t price, int32_t percent)` |
-| Meaning | service fee = price * percent / 100, rounded down; money in integer smallest currency units |
-| Valid range | price 0-1 000 000, percent 0-100 |
-| Invalid input | returns -1 |
-| Manual example | `service_fee(1500, 10) = 150` |
+| Student | Akhmet Amira, group IT-2514 (individual project) |
+| Repository | https://github.com/amira928/IT-2514-FP-Final |
+| Branch | `main` |
+| Last code commit | `d08a5a1` (source and tests; README and reports were added after it) |
 
-C# binding: `NativeMethods` (`DllImport`, `EntryPoint = "service_fee"`, `Cdecl`). Adapter `NativeFeeAdapter.ServiceFee` validates inputs before the call and turns `DllNotFoundException`, `EntryPointNotFoundException`, `BadImageFormatException` and a -1 result into `Result` failures. It is used in `Program.cs` (demonstration 9) and in the workflow test.
+## 1. Problem, users, goals
+A small delivery company needs to price delivery requests, accept orders from customers within their credit limit, and plan the dispatch with a service fee. Users: a dispatcher (workflows) and a manager or analyst (reports). The application is a console program. Goal: show the functional techniques of the course in one coherent domain.
 
-Platform: Windows x64. Compiler: gcc 16.2.0 (MinGW-W64 x86_64-ucrt-posix-seh, WinLibs), target `x86_64-w64-mingw32`.
-Build: `native\build.bat` creates `native\runtime\win-x64\delivery_native.dll` (needs MinGW in `C:\mingw64`, see `native\setup_gcc.bat`). The compiled DLL is included. `DeliveryQuotes.App.csproj` copies it next to the application on build, so the loader finds it.
+## 2. Domain models
+| Model | Purpose |
+|---|---|
+| `RawRequest`, `ValidatedRequest`, `Quote` | delivery request (Id, distance 1-50 km) and its price |
+| `Customer` (from `RawCustomer`) | customer with tier (Regular or Gold) and credit limit, created only by `Customer.Create` |
+| `ApprovedOrder`, `OrderBook` | approved order of a customer; immutable list of orders |
+| `DispatchPlan` | price + service fee + total for an approved order |
 
-Difficulty: my Windows user name has Cyrillic letters, and gcc failed with `Illegal byte sequence` (it could not read its own libraries from that path). Solution: copy MinGW to `C:\mingw64`, use relative paths and set `TMP`/`TEMP` to `C:\gcc_tmp` in `build.bat`.
+## 3. Workflows (minimum for one student: 3)
+| # | Workflow | Input | Business rules | Result | Code |
+|---|---|---|---|---|---|
+| 1 | Quote and confirm | request | distance 1-50 km; state order Requested, Quoted, Confirmed | confirmed quote | `QuoteWorkflow.cs`, `QuoteState.cs` |
+| 2 | Place an order | customer id + request id | customer and request exist, request is valid, Gold discount, total spent within credit limit, no duplicate order | new `OrderBook` | `OrderWorkflow.cs` |
+| 3 | Dispatch plan | approved order + service type | Express only up to 20 km; fee percent by service; fee from the native C library | `DispatchPlan` | `DispatchWorkflow.cs` |
 
-## 8. Requirements map
+Example output (`dotnet run --project DeliveryQuotes.App`):
+```
+C001 + R002: APPROVED, list 1500, final 1350
+C002 + R004: REJECTED - R004: total 5500 exceeds the credit limit 2000 of customer C002.
+R002 Standard: price 1350 + fee 135 = total 1485
+R004 Express: REJECTED - R004: Express delivery is limited to 20 km, but the distance is 50 km.
+```
+
+## 4. Reports
+1. Premium quotes (manager): Where, extension ordering, Select - `Reports.PremiumQuotes`.
+2. Totals by distance band (analyst): GroupBy, Count and Sum, ordering with tie-breaker - `Reports.TotalsByBand`.
+
+## 5. Requirement map
 | Requirement | Where |
 |---|---|
-| Two extensions | `QuoteExtensions.cs`, used in `Reports.cs` |
-| Two LINQ reports | `Reports.cs` |
-| Currying + two partial applications | `Scoring.cs`, `Program.cs` |
-| Deferred execution | `LazyQueries.cs` |
-| Resources and disposal | `LineSource.cs`, `ReportExporter.cs` |
-| Native library and adapter | `native/`, `NativeFeeAdapter.cs` |
-| Integration and export | `Program.cs`, `ReportExporter.cs` |
+| Pure core, immutable values | `Pipeline.cs`, `OrderWorkflow.cs`, `DispatchWorkflow.cs`, `OrderBook.cs` (records, no I/O) |
+| Pattern matching | `QuoteWorkflow.Describe`, `Eligibility` cases in `DispatchWorkflow.cs`, `switch` in `Program.cs` |
+| Pipeline with 3 named stages | `Pipeline.NormalizeRequests`, `CalculateQuotes`, `BuildSummary` |
+| Higher-order function changing a rule | `pricePolicy` and `discount` delegates in `OrderWorkflow.Place`; `feeCalculator` in `DispatchWorkflow.Plan` |
+| Two policies, same input, different result | Standard vs Express (`PricePolicies.cs`); gold 10% vs gold 20% (`DiscountPolicies.cs`) |
+| Validated factories | `ValidatedRequest.Create`, `Customer.Create` (private constructors), `ApprovedOrder` (internal constructor) |
+| Safe operation sequence | `QuoteState` (confirm before calculate is rejected); `OrderBook.Add` returns a new book, a failed add changes nothing |
+| Result, Map, Bind | `Result.cs`; `OrderWorkflow.Place`, `DispatchWorkflow.Plan`, `CustomerCatalog.Load` |
+| Missing lookups | `Maybe.cs`, `RequestLookup.FindById`, `CustomerCatalog.FindById` |
+| Boundary exceptions | `CsvLoader`, `FileBoundary`, `ReportExporter`, `NativeFeeAdapter` |
+| Extension methods | `QuoteExtensions.cs` (`OrderByMostExpensive`, `DistanceBand`) |
+| Currying and partial application | `Scoring.CreateScore(10)(5)`, `DiscountPolicies.CreateTierDiscount(10)` |
+| Lazy processing | `LazyQueries.LazyQuotes` (`yield return`), `ToArray()` as the snapshot point |
+| Persistence | load `data/requests.csv` and `data/customers.csv`; export `output/band_totals.csv` |
+| Native C library | `native/delivery_native.c`, `NativeFeeAdapter.cs` |
 
-## 9. Tests
-Total 56 (37 earlier + 19 new in `Assignment8Tests.cs`); latest run: 56 passed, 0 failed.
+## 6. Resource ownership and data retention
+Exporters and `LineSource` own their writers and readers and release them with `using`, also when an error happens. Datasets are materialised once (`ToArray`), nothing is cached in static fields. Exported files in `output/` are overwritten on every run. Sample data contains only invented names.
 
-| Area | Tests |
-|---|---|
-| Extensions | order and no mutation; band boundaries 5, 6, 20, 21 |
-| Reports | normal, no matches, empty, boundary, ties, grouping and totals |
-| Configured functions | relaxed vs strict on the same input |
-| Deferred | 0 calls before iteration, 2 after `ToArray`, snapshot reuse does not recalculate |
-| Resources | disposed after full enumeration, early stop and failure |
-| Native | real call = 150; invalid arguments rejected before the call; load failure -> `Failure` |
-| Workflows | normal (CSV, report, export, native fee 220); failure (missing and malformed file, no output created) |
-| File boundaries | missing and malformed file tests from Assignment 7 |
+## 7. Native C library
+Function `int32_t service_fee(int32_t price, int32_t percent)` returns price * percent / 100 (rounded down); invalid input returns -1.
+Platform: Windows x64. Compiler: gcc (MinGW-W64). Build: `native\build.bat` creates `native\runtime\win-x64\delivery_native.dll` (compiler setup: `native\setup_gcc.bat`). The compiled DLL is included and `DeliveryQuotes.App.csproj` copies it next to the application. Loading: `DllImport("delivery_native")`. A missing DLL, wrong format, missing entry point or result -1 becomes a `Result` failure in `NativeFeeAdapter`. Tests: real call (`Dispatch_RealNativeCall_CalculatesTheFee`) and controlled failure (`Dispatch_NativeLoadFailure_IsAControlledFailure`).
 
-File tests use temporary folders and delete them.
-
-## 10. Build, run, test
-Prerequisite: .NET SDK 10.0.401, Windows x64. Run from the folder with `DeliveryQuotes.slnx`:
-
+## 8. Build, run, test
+Prerequisite: .NET SDK 10.0.401, Windows x64. Run from the folder that contains `DeliveryQuotes.slnx` (data paths are relative to it):
 ```
 dotnet build
 dotnet run --project DeliveryQuotes.App
 dotnet test
 ```
 
-`dotnet run` prints the earlier demonstrations and then native fee (9), both reports, the two scoring functions, lazy quotes, file lines and the export to `output/band_totals.csv`.
-Failure demonstrations: missing file and malformed file (`data/malformed.csv`) are shown in the same output.
+## 9. Tests
+81 tests: 56 from Assignments 5-8 and 25 new in `FinalProjectTests.cs`. Covered: pure functions and validation, boundaries, empty and missing cases, safe ordering, failure propagation, reports, configured functions, lazy processing, native call and native failure, missing and malformed files, two complete workflows. Last result: 81 passed, 0 failed.
+
+## 10. Limitations
+Console application only; demo orders are listed in `Program.cs`; the native DLL is for Windows x64 only; prices are integers; AI assistance was used and is described in the individual report.
