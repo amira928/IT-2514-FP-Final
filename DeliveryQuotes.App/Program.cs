@@ -21,6 +21,25 @@ if (loaded is not Result<IReadOnlyList<RawRequest>>.Success loadSuccess)
 }
 
 var rawRequests = loadSuccess.Value;
+var customersResult = CustomerCatalog.LoadValidated("data/customers.csv");
+
+if (customersResult is Result<IReadOnlyList<Customer>>.Failure customersFailure)
+{
+    Console.WriteLine("CUSTOMER FILE PROBLEM:");
+    foreach (var problem in customersFailure.Errors)
+    {
+        Console.WriteLine($"  {problem}");
+    }
+    return;
+}
+
+if (customersResult is not Result<IReadOnlyList<Customer>>.Success customersSuccess)
+{
+    Console.WriteLine("Unknown customer load result.");
+    return;
+}
+
+var customers = customersSuccess.Value;
 
 var validRequests = new List<DeliveryRequest>();
 var errors = new List<string>();
@@ -132,6 +151,59 @@ Console.WriteLine(ReportExporter.ExportBandTotals(Reports.TotalsByBand(standardS
     Result<string>.Failure f => "  Export failed: " + string.Join("; ", f.Errors),
     _ => "  unknown"
 });
+Console.WriteLine();
+Console.WriteLine("=== WORKFLOW 2: place orders (Standard price, Gold discount 10%) ===");
+
+var gold10 = DiscountPolicies.CreateTierDiscount(10);
+
+var demoOrders = new[]
+{
+    ("C001", "R002"),
+    ("C001", "R001"),
+    ("C002", "R004"),
+    ("C002", "R003"),
+    ("C999", "R001"),
+    ("C001", "R005"),
+    ("C003", "R004"),
+    ("C001", "R001")
+};
+
+var book = OrderBook.Empty;
+foreach (var (customerId, requestId) in demoOrders)
+{
+    var placed = OrderWorkflow.Place(book, customers, rawRequests, customerId, requestId, PricePolicies.Standard, gold10);
+
+    switch (placed)
+    {
+        case Result<OrderBook>.Success placedOk:
+            book = placedOk.Value;
+            var lastOrder = book.Orders.Last();
+            Console.WriteLine($"  {customerId} + {requestId}: APPROVED, list {lastOrder.ListPrice}, final {lastOrder.FinalPrice}");
+            break;
+        case Result<OrderBook>.Failure placedBad:
+            Console.WriteLine($"  {customerId} + {requestId}: REJECTED - {string.Join("; ", placedBad.Errors)}");
+            break;
+    }
+}
+Console.WriteLine($"  Orders in the book: {book.Orders.Count}");
+
+Console.WriteLine();
+Console.WriteLine("=== WORKFLOW 3: dispatch plan (fee from the native C library) ===");
+foreach (var order in book.Orders)
+{
+    foreach (var service in new[] { ServiceType.Standard, ServiceType.Express })
+    {
+        var plan = DispatchWorkflow.Plan(order, service);
+        var text = plan switch
+        {
+            Result<DispatchPlan>.Success planOk =>
+                $"price {planOk.Value.Price} + fee {planOk.Value.ServiceFee} = total {planOk.Value.Total}",
+            Result<DispatchPlan>.Failure planBad => "REJECTED - " + string.Join("; ", planBad.Errors),
+            _ => "unknown"
+        };
+        Console.WriteLine($"  {order.OrderId} {service}: {text}");
+    }
+}
 
 static string DescribeLookup(IReadOnlyList<RawRequest> requests, string id) =>
     RequestLookup.FindById(requests, id) switch
